@@ -10,11 +10,18 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 from concurrent.futures import ThreadPoolExecutor
 from werkzeug.utils import secure_filename
 from insightface.app import FaceAnalysis
+from flask_cors import CORS, cross_origin
+
 
 app = Flask(__name__)
+CORS(app)
 
 # Initialize face analysis model
-face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+FACE_MODEL_ROOT = "/workspace/FaceDetection"  # Local Models Folder
+face_app = FaceAnalysis(
+    name='buffalo_l',
+    root=FACE_MODEL_ROOT    # This prevents downloading
+)
 face_app.prepare(ctx_id=0)
 
 # Cache and lock for thread-safe encoding cache access
@@ -24,16 +31,20 @@ encoding_lock = threading.Lock()
 LIBRARIES_DIR = "./"
 
 @app.route('/library_image/<library>/<filename>')
+@cross_origin()  # Allows all origins by default
 def get_library_image(library, filename):
     folder_path = get_library_path(library)
-    return send_from_directory(folder_path, filename)
+    try:
+        return send_from_directory(folder_path, filename)
+    except:
+        return jsonify({'Status': 'false', 'error': 'Image not found'}), 404
 
 # New route for the UI
 @app.route('/ui')
 def ui():
     libraries = [d for d in os.listdir(LIBRARIES_DIR) 
                 if os.path.isdir(os.path.join(LIBRARIES_DIR, d)) and not d.startswith('.')]
- 
+    return render_template('index.html', libraries=libraries)
 def sanitize_folder_name(name):
     return re.sub(r'[<>:"/\\|?*]', '', name.strip())
 
@@ -130,7 +141,7 @@ def update_encodings_with_new_images(folder_path, new_files):
 
 @app.route('/')
 def home():
-    return "✅ Face Recognition API is running!"
+    return jsonify({'Status': 'true', 'message': '✅ Face Recognition API is running!'})
 
 
 def assess_image_quality(image):
@@ -163,7 +174,7 @@ def assess_image_quality(image):
 @app.route('/upload', methods=['POST'])
 def upload_images():
     if 'images' not in request.files or 'library' not in request.form:
-        return jsonify({'error': 'Images and library name are required'}), 400
+        return jsonify({'Status': 'false', 'error': 'Images and library name are required'}), 400
 
     image_files = request.files.getlist('images')
     library = request.form['library']
@@ -193,16 +204,17 @@ def upload_images():
     update_encodings_with_new_images(folder_path, [x['filename'] for x in accepted])
 
     return jsonify({
+        'Status': 'true' if len(accepted) > 0 else 'false',
         'accepted': accepted,
         'rejected': rejected,
         'message': f'✅ {len(accepted)} image(s) accepted, {len(rejected)} rejected.'
-    }), 200
+    }), 200 if len(accepted) > 0 else 400
 
 
 @app.route('/single_detect', methods=['POST'])
 def compare_api():
     if 'image' not in request.files or 'library' not in request.form:
-        return jsonify({'error': 'Image and library name are required'}), 400
+        return jsonify({'Status': 'false', 'error': 'Image and library name are required'}), 400
 
     image_file = request.files['image']
     library = request.form['library']
@@ -212,22 +224,22 @@ def compare_api():
     folder_path = get_library_path(library)
     if not os.path.exists(folder_path):
         os.remove(temp_filename)
-        return jsonify({'error': f'Library "{library}" not found'}), 404
+        return jsonify({'Status': 'false', 'error': f'Library "{library}" not found'}), 404
 
     force_rebuild = request.args.get('force_rebuild', 'false').lower() == 'true'
     result = compare_faces(temp_filename, folder_path, force_rebuild=force_rebuild, top_k=5)
     os.remove(temp_filename)
 
     if isinstance(result, str):
-        return jsonify({'message': result}), 404
+        return jsonify({'Status': 'false', 'message': result}), 404
     else:
-        return jsonify(result), 200
+        return jsonify({'Status': 'true', 'data': result}), 200
 
 
 @app.route('/all_detect', methods=['POST'])
 def found_faces():
     if 'image' not in request.files or 'library' not in request.form:
-        return jsonify({'error': 'Image and library name are required'}), 400
+        return jsonify({'Status': 'false', 'error': 'Image and library name are required'}), 400
 
     image_file = request.files['image']
     library = request.form['library']
@@ -237,40 +249,40 @@ def found_faces():
     folder_path = get_library_path(library)
     if not os.path.exists(folder_path):
         os.remove(temp_filename)
-        return jsonify({'error': f'Library "{library}" not found'}), 404
+        return jsonify({'Status': 'false', 'error': f'Library "{library}" not found'}), 404
 
     force_rebuild = request.args.get('force_rebuild', 'false').lower() == 'true'
     result = compare_faces(temp_filename, folder_path, force_rebuild=force_rebuild, top_k=None)
     os.remove(temp_filename)
 
     if isinstance(result, str):
-        return jsonify({'message': result}), 404
+        return jsonify({'Status': 'false', 'message': result}), 404
     else:
-        return jsonify(result), 200
+        return jsonify({'Status': 'true', 'data': result}), 200
 
 
 @app.route('/delete_library', methods=['POST'])
 def delete_library():
     if 'library' not in request.form:
-        return jsonify({'error': 'Library name is required'}), 400
+        return jsonify({'Status':'false','error': 'Library name is required'}), 400
 
     library = request.form['library']
     folder_path = get_library_path(library)
 
     if not os.path.exists(folder_path):
-        return jsonify({'error': 'Library not found'}), 404
+        return jsonify({'Status':'false','error': 'Library not found'}), 404
 
     shutil.rmtree(folder_path)
     with encoding_lock:
         encoding_cache.pop(folder_path, None)
 
-    return jsonify({'message': f'✅ Library "{library}" deleted successfully.'}), 200
+    return jsonify({'Status':'true','message': f'✅ Library "{library}" deleted successfully.'}), 200
 
 
 @app.route('/delete_image', methods=['POST'])
 def delete_image():
     if 'library' not in request.form or 'filename' not in request.form:
-        return jsonify({'error': 'Library and filename are required'}), 400
+        return jsonify({'Status':'false','error': 'Library and filename are required'}), 400
 
     library = request.form['library']
     filename = secure_filename(request.form['filename'])
@@ -278,7 +290,7 @@ def delete_image():
     filepath = os.path.join(folder_path, filename)
 
     if not os.path.exists(filepath):
-        return jsonify({'error': 'Image not found'}), 404
+        return jsonify({'Status':'false','error': 'Image not found'}), 404
 
     os.remove(filepath)
 
@@ -299,7 +311,7 @@ def delete_image():
             with encoding_lock:
                 encoding_cache.pop(folder_path, None)
 
-    return jsonify({'message': f'✅ Image "{filename}" deleted and encodings updated.'}), 200
+    return jsonify({'Status':'true','message': f'✅ Image "{filename}" deleted and encodings updated.'}), 200
 
 
 def compare_faces(input_image_path, folder_path, threshold=0.5, force_rebuild=False, top_k=5):
@@ -343,7 +355,23 @@ def compare_faces(input_image_path, folder_path, threshold=0.5, force_rebuild=Fa
         "matches": matches
     }
 
+@app.route('/get_library_images/<library>')
+def get_images(library):
+    folder_path = get_library_path(library)
+    try:
+        if not os.path.exists(folder_path):
+            return jsonify({'Status': 'false', 'error': 'Library not found'}), 404
+
+        # List image files (filter by extension)
+        image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
+        image_files = [f for f in os.listdir(folder_path)
+                       if os.path.isfile(os.path.join(folder_path, f)) and f.lower().endswith(image_extensions)]
+
+        return jsonify({'Status': 'true', 'images': image_files})
+
+    except Exception as e:
+        return jsonify({'Status': 'false', 'error': str(e)}), 500
 
 if __name__ == '__main__':
     os.makedirs(LIBRARIES_DIR, exist_ok=True)
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=8003)
